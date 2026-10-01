@@ -1,8 +1,9 @@
 import cv2
 import numpy as np
 import os
+import random
 
-# TODO: handle packing_coordinates being overwritten when packing with different algorithms
+#TODO: add diffent heuristic options for algorithm 
 
 # Purpose: Serves as an atlas packer for rectangular textures.
 class TextureAtlasPacker:
@@ -15,8 +16,8 @@ class TextureAtlasPacker:
         self.atlas_width = 1024
         self.atlas_height = 1024
         self.algorithm = 'basic_greedy'
-        self.packing_coordinates = dict() # 'key' = texture file name, 'value' = (x, y, height, width)
-        #self.get_texture_dimensions(self) # get dimensions of textures and sort based on area
+        self.packing_coordinates = dict() # 'key' = texture file name, 'value' = (x, y, height, width, rotated)
+        self._get_texture_dimensions() # get dimensions of textures and sort based on area
 
     # manually adjust the dimensions of the atlas file
     def set_atlas_dimensions(self, width, height):
@@ -24,7 +25,7 @@ class TextureAtlasPacker:
         self.atlas_height = height
 
     # creates a dictionary where key is the texture file name and the value is an array containing the height, width, and area values
-    def get_texture_dimensions(self):
+    def _get_texture_dimensions(self):
         # get the dimensions of each texture and store them in a dictionary
         for texture in self.textures:
             if (self.folder_path == None):
@@ -35,12 +36,27 @@ class TextureAtlasPacker:
             height, width = texture_file.shape[:2]
             area = height * width
             self.texture_dimensions[texture] = (height, width, area)
-        # sort the dictionary based on area in descending order
-        self.texture_dimensions = dict(sorted(self.texture_dimensions.items(), key=lambda item: item[1][2], reverse=True))
-        
+
+    # sorts textures based on area, perimeter, shortest side, or longest side
+    def sort_texture_dimensions(self, type):
+        if (type == "area"):
+            self.texture_dimensions = dict(sorted(self.texture_dimensions.items(), key=lambda item: item[1][2], reverse=True))
+        elif (type == "perimeter"):
+            self.texture_dimensions = dict(sorted(self.texture_dimensions.items(), key=lambda item: 2 * (item[1][0] + item[1][1]), reverse=True))
+        elif (type == "shortest side"):
+            self.texture_dimensions = dict(sorted(self.texture_dimensions.items(), key=lambda item: min(item[1][0], item[1][1])))
+        elif (type == "longest side"):
+            self.texture_dimensions = dict(sorted(self.texture_dimensions.items(), key=lambda item: max(item[1][0], item[1][1])))
+        else:
+            print("Invalid sorting type. Permitted Types: area, perimeter, shortest side, longest side")
+
 
     # packs the uploaded textures based on algorithm specified by the user and returns the packing coordinates of the textures in the atlas
     def pack(self, algorithm):
+        # overwrites previous packed coordinated if pack is called again
+        if(len(self.packing_coordinates) != 0):
+            new_packing_coordinates = dict()
+            self.packing_coordinates = new_packing_coordinates
         # call packing algorithm based on parameter given
         if algorithm == "greedy":
             self._basic_greedy_packer()
@@ -55,26 +71,53 @@ class TextureAtlasPacker:
             return None
 
         # print whitespace calculation
-        print(f"Empty space in atlas after packing: {self._empty_space_calculation() * 100:.2f}%")
+        print(f"Empty space in atlas after packing with {algorithm} algorithm: {self._empty_space_calculation() * 100:.2f}%")
 
-    # TODO: get generated shapes to be able to display on window
     # opens a gui of the atlas after the texures have been packed by the pack() method
     def visualize_atlas(self):
         # create a blank image of the atlas dimensions
         atlas_image = np.zeros((self.atlas_height, self.atlas_width, 3), dtype=np.uint8)
         # fill the atlas image with the packed textures
         for texture, coordinates in self.packing_coordinates.items():
-            #print(texture, coordinates)
-            x, y, height, width = coordinates
-            if (self.folder_path == None): 
-                texture_file = self.textures[texture]
-            else:
+            x, y, height, width = coordinates[:4]
+            rotated = coordinates[4] if len(coordinates) > 4 else False
+            if (self.folder_path is not None): 
+                # real texture files on disk
                 texture_file = cv2.imread(os.path.join(self.folder_path, texture))
+            else:
+                source = self.textures[texture]
+                if isinstance(source, np.ndarray):
+                    # an actual image array was supplied directly
+                    texture_file = source
+                else:
+                    # generated shape data (e.g. from ShapeGenerator): (height, width, area, rgb).
+                    # no real pixel data exists, so render a solid rectangle in its color instead.
+                    # use the original (pre-rotation) dimensions to build the block, then rotate
+                    orig_h, orig_w = source[0], source[1]
+                    rgb = source[3] if len(source) > 3 else self._random_rgb()
+                    texture_file = self._solid_color_rect(orig_h, orig_w, rgb)
+            # if the texture was placed rotated 90°, rotate the image block to match the atlas slot
+            if rotated:
+                texture_file = cv2.rotate(texture_file, cv2.ROTATE_90_CLOCKWISE)
             atlas_image[y:y+height, x:x+width] = texture_file
         # display the atlas image in a window
         cv2.imshow("Texture Atlas", atlas_image)
         cv2.waitKey(0)
         cv2.destroyAllWindows()
+
+    # generates a random (r, g, b) color, used when a texture has no color of its own
+    def _random_rgb(self):
+        return (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
+
+    # builds a solid-color height x width image block (with a thin darker border so
+    # adjacent same-ish colored rectangles remain visually distinguishable in the atlas)
+    def _solid_color_rect(self, height, width, rgb):
+        r, g, b = rgb
+        # cv2/numpy images are stored as BGR, not RGB
+        block = np.full((height, width, 3), (b, g, r), dtype=np.uint8)
+        border_color = (max(b - 60, 0), max(g - 60, 0), max(r - 60, 0))
+        cv2.rectangle(block, (0, 0), (width - 1, height - 1), border_color, thickness=1)
+        return block
 
     # greedy packing algorithm for rectangular textures using first fit decreasing rules (FFD) 
     # rotations disallowed
@@ -84,18 +127,18 @@ class TextureAtlasPacker:
             height, width, area = dimensions
             # check if the texture can fit in the atlas
             if height > self.atlas_height or width > self.atlas_width:
-                print(f"Texture {texture} is too large to fit in the atlas. Change the atlas dimensions or remove the texture from the list.")
+                #print(f"Texture {texture} is too large to fit in the atlas. Change the atlas dimensions or remove the texture from the list.")
                 continue
             # check packing_coordinates to see if the texture can fit in the atlas
             if self.packing_coordinates == {}:
-                self.packing_coordinates[texture] = (0, 0, height, width)
+                self.packing_coordinates[texture] = (0, 0, height, width, False)
             else:
                 # find the next available space in the atlas
                 for y in range(self.atlas_height):
                     for x in range(self.atlas_width):
                         # check if the texture can fit in the atlas at this position
                         if self._can_fit(x, y, height, width):
-                            self.packing_coordinates[texture] = (x, y, height, width)
+                            self.packing_coordinates[texture] = (x, y, height, width, False)
                             break
                     else:
                         continue
@@ -105,7 +148,7 @@ class TextureAtlasPacker:
     def _can_fit(self, x, y, height, width):
         # check if the texture can fit in the atlas at the given position
         for texture, coordinates in self.packing_coordinates.items():
-            x1, y1, h1, w1 = coordinates
+            x1, y1, h1, w1 = coordinates[:4]
             if (x < x1 + w1 and x + width > x1 and y < y1 + h1 and y + height > y1):
                 return False
             elif(x + width > self.atlas_width or y + height > self.atlas_height):
@@ -117,16 +160,18 @@ class TextureAtlasPacker:
         # sum areas of packed textures
         texture_areas = 0
         for texture, vals in self.packing_coordinates.items():
-            x, y, h, w = vals
+            x, y, h, w = vals[:4]
             texture_areas += h * w
 
         # get total area of atlas file
         atlas_area = self.atlas_width * self.atlas_height
         return (atlas_area - texture_areas) / atlas_area
 
-    # rectangle support only, rotations disallowed
+    # rectangle support, 90-degree rotations allowed
     # skyline bottom-left algorithm: places each texture at the lowest-then-leftmost
-    # position along the current skyline profile, minimizing wasted space beneath it
+    # position along the current skyline profile, minimizing wasted space beneath it.
+    # Both the original orientation and 90-degree rotation are tried; the orientation
+    # that yields the best (lowest span_y, then least wasted space) placement is used.
     def _basic_skyline_packer(self):
         # skyline segments: list of [x, width, y] covering the full atlas width with no gaps,
         # sorted left to right, where y is the current height of the skyline at that segment
@@ -135,54 +180,67 @@ class TextureAtlasPacker:
         # loop through each texture (largest area first) to place it in the atlas
         for texture, dimensions in self.texture_dimensions.items():
             height, width, area = dimensions
-            # check if the texture can ever fit in the atlas regardless of placement
-            if width > self.atlas_width or height > self.atlas_height:
-                print(f"Texture {texture} is too large to fit in the atlas. Change the atlas dimensions or remove the texture from the list.")
+
+            # check if the texture can ever fit in the atlas in either orientation
+            fits_normal  = width <= self.atlas_width and height <= self.atlas_height
+            fits_rotated = height <= self.atlas_width and width <= self.atlas_height
+            if not fits_normal and not fits_rotated:
+                #print(f"Texture {texture} is too large to fit in the atlas. Change the atlas dimensions or remove the texture from the list.")
                 continue
 
-            best = None  # (y, wasted_space, x)
+            # orientations to try: (place_w, place_h, rotated_flag)
+            orientations = []
+            if fits_normal:
+                orientations.append((width, height, False))
+            if fits_rotated and (height, width) != (width, height):
+                orientations.append((height, width, True))
 
-            # try placing the texture starting at each segment's left edge
-            for i in range(len(segments)):
-                x = segments[i][0]
-                if x + width > self.atlas_width:
-                    continue
+            best = None  # (span_y, wasted_space, x, place_w, place_h, rotated)
 
-                # find the highest skyline point spanned by the texture's width
-                span_y = 0
-                j = i
-                while j < len(segments) and segments[j][0] < x + width:
-                    span_y = max(span_y, segments[j][2])
-                    j += 1
+            for place_w, place_h, rotated in orientations:
+                # try placing the texture starting at each segment's left edge
+                for i in range(len(segments)):
+                    x = segments[i][0]
+                    if x + place_w > self.atlas_width:
+                        continue
 
-                if span_y + height > self.atlas_height:
-                    continue
+                    # find the highest skyline point spanned by the texture's width
+                    span_y = 0
+                    j = i
+                    while j < len(segments) and segments[j][0] < x + place_w:
+                        span_y = max(span_y, segments[j][2])
+                        j += 1
 
-                # wasted space = area between the placed texture's bottom and the skyline beneath it
-                wasted_space = 0
-                j = i
-                while j < len(segments) and segments[j][0] < x + width:
-                    seg_x, seg_w, seg_y = segments[j]
-                    overlap = min(seg_x + seg_w, x + width) - max(seg_x, x)
-                    wasted_space += (span_y - seg_y) * overlap
-                    j += 1
+                    if span_y + place_h > self.atlas_height:
+                        continue
 
-                candidate = (span_y, wasted_space, x)
-                if best is None or candidate < best:
-                    best = candidate
+                    # wasted space = area between the placed texture's bottom and the skyline beneath it
+                    wasted_space = 0
+                    j = i
+                    while j < len(segments) and segments[j][0] < x + place_w:
+                        seg_x, seg_w, seg_y = segments[j]
+                        overlap = min(seg_x + seg_w, x + place_w) - max(seg_x, x)
+                        wasted_space += (span_y - seg_y) * overlap
+                        j += 1
+
+                    candidate = (span_y, wasted_space, x, place_w, place_h, rotated)
+                    if best is None or candidate[:2] < best[:2]:
+                        best = candidate
 
             # if no candidate position was found, the texture cannot be placed
             if best is None:
-                print(f"Texture {texture} could not be placed in the atlas. Change the atlas dimensions or remove the texture from the list.\nContinuing to next texture...")
+                #print(f"Texture {texture} could not be placed in the atlas. Change the atlas dimensions or remove the texture from the list.")
                 continue
 
-            best_y, best_wasted_space, best_x = best
+            best_y, best_wasted_space, best_x, place_w, place_h, rotated = best
 
-            # record the placement
-            self.packing_coordinates[texture] = (best_x, best_y, height, width)
+            # record the placement — store (h, w) as they appear in the atlas slot
+            placed_h = place_h  # height in atlas = place_h
+            placed_w = place_w  # width  in atlas = place_w
+            self.packing_coordinates[texture] = (best_x, best_y, placed_h, placed_w, rotated)
 
             # update the skyline to reflect the newly placed texture
-            self._update_skyline(segments, best_x, width, best_y + height)
+            self._update_skyline(segments, best_x, place_w, best_y + place_h)
 
     # internal method used by _basic_skyline_packer to update the skyline profile
     # after placing a texture: splits/removes segments under the texture, inserts a
@@ -217,39 +275,57 @@ class TextureAtlasPacker:
 
         segments[:] = merged
 
-    # rectangle support only, rotations disallowed
+    # rectangle support, 90-degree rotations allowed
     # MAXRECTS-BAF (best area fit): tracks the set of maximal free rectangles remaining
     # in the atlas, places each texture in the free rectangle that leaves the least
-    # leftover area, then splits every free rectangle that overlaps the placed texture
+    # leftover area, trying both normal and 90-degree rotated orientations.
     def _basic_maxrects_packer(self):
         # free rectangles stored as [x, y, width, height]
         free_rects = [[0, 0, self.atlas_width, self.atlas_height]]
 
         for texture, dimensions in self.texture_dimensions.items():
             height, width, area = dimensions
-            if width > self.atlas_width or height > self.atlas_height:
-                print(f"Texture {texture} is too large to fit in the atlas. Change the atlas dimensions or remove the texture from the list.")
+
+            fits_normal  = width <= self.atlas_width and height <= self.atlas_height
+            fits_rotated = height <= self.atlas_width and width <= self.atlas_height
+            if not fits_normal and not fits_rotated:
+                #print(f"Texture {texture} is too large to fit in the atlas. Change the atlas dimensions or remove the texture from the list.")
                 continue
 
-            # find the free rectangle that fits the texture with the least leftover area
+            # orientations to try: (place_w, place_h, rotated_flag)
+            orientations = []
+            if fits_normal:
+                orientations.append((width, height, False))
+            if fits_rotated and (height, width) != (width, height):
+                orientations.append((height, width, True))
+
+            # find the free rectangle + orientation that fits with the least leftover area
             best_idx = -1
             best_leftover = None
-            for i, (x, y, w, h) in enumerate(free_rects):
-                if width <= w and height <= h:
-                    leftover = (w * h) - (width * height)
-                    if best_leftover is None or leftover < best_leftover:
-                        best_leftover = leftover
-                        best_idx = i
+            best_place_w = width
+            best_place_h = height
+            best_rotated = False
+
+            for place_w, place_h, rotated in orientations:
+                for i, (x, y, w, h) in enumerate(free_rects):
+                    if place_w <= w and place_h <= h:
+                        leftover = (w * h) - (place_w * place_h)
+                        if best_leftover is None or leftover < best_leftover:
+                            best_leftover = leftover
+                            best_idx = i
+                            best_place_w = place_w
+                            best_place_h = place_h
+                            best_rotated = rotated
 
             if best_idx == -1:
-                print(f"Texture {texture} could not be placed in the atlas. Change the atlas dimensions or remove the texture from the list.")
+                #print(f"Texture {texture} could not be placed in the atlas. Change the atlas dimensions or remove the texture from the list.")
                 continue
 
             place_x, place_y = free_rects[best_idx][0], free_rects[best_idx][1]
-            placed_rect = [place_x, place_y, width, height]
+            placed_rect = [place_x, place_y, best_place_w, best_place_h]
 
             # record the placement
-            self.packing_coordinates[texture] = (place_x, place_y, height, width)
+            self.packing_coordinates[texture] = (place_x, place_y, best_place_h, best_place_w, best_rotated)
 
             # split every free rectangle that overlaps the placed texture into the
             # (up to four) maximal free rectangles that remain around it
@@ -291,42 +367,60 @@ class TextureAtlasPacker:
 
         return results
 
-    # rectangle support only, rotations disallowed
+    # rectangle support, 90-degree rotations allowed
     # guillotine packer: places each texture in the free region with the least leftover
-    # area, then splits that region into two new regions with a single straight
-    # (guillotine) cut, choosing the cut axis that minimizes the worse leftover sliver
+    # area, trying both normal and 90-degree rotated orientations, then splits that
+    # region into two new regions with a single straight (guillotine) cut, choosing
+    # the cut axis that minimizes the worse leftover sliver
     def _basic_guillotine_packer(self):
         # free regions stored as [x, y, width, height]
         free_regions = [[0, 0, self.atlas_width, self.atlas_height]]
 
         for texture, dimensions in self.texture_dimensions.items():
             height, width, area = dimensions
-            # check if the texture can ever fit in the atlas regardless of placement
-            if height > self.atlas_height or width > self.atlas_width:
-                print(f"Texture {texture} is too large to fit in the atlas. Change the atlas dimensions or remove the texture from the list.")
+
+            fits_normal  = width <= self.atlas_width and height <= self.atlas_height
+            fits_rotated = height <= self.atlas_width and width <= self.atlas_height
+            if not fits_normal and not fits_rotated:
+                #print(f"Texture {texture} is too large to fit in the atlas. Change the atlas dimensions or remove the texture from the list.")
                 continue
 
-            # find the free region that fits the texture with the least leftover area
+            # orientations to try: (place_w, place_h, rotated_flag)
+            orientations = []
+            if fits_normal:
+                orientations.append((width, height, False))
+            if fits_rotated and (height, width) != (width, height):
+                orientations.append((height, width, True))
+
+            # find the free region + orientation with the least leftover area
             best_idx = -1
             best_leftover = None
-            for i, (x, y, w, h) in enumerate(free_regions):
-                if width <= w and height <= h:
-                    leftover = (w * h) - (width * height)
-                    if best_leftover is None or leftover < best_leftover:
-                        best_leftover = leftover
-                        best_idx = i
+            best_place_w = width
+            best_place_h = height
+            best_rotated = False
+
+            for place_w, place_h, rotated in orientations:
+                for i, (x, y, w, h) in enumerate(free_regions):
+                    if place_w <= w and place_h <= h:
+                        leftover = (w * h) - (place_w * place_h)
+                        if best_leftover is None or leftover < best_leftover:
+                            best_leftover = leftover
+                            best_idx = i
+                            best_place_w = place_w
+                            best_place_h = place_h
+                            best_rotated = rotated
 
             if best_idx == -1:
-                print(f"Texture {texture} could not be placed in the atlas. Change the atlas dimensions or remove the texture from the list.")
+                #print(f"Texture {texture} could not be placed in the atlas. Change the atlas dimensions or remove the texture from the list.")
                 continue
 
             x, y, w, h = free_regions.pop(best_idx)
 
             # place the texture in the top-left corner of the chosen region
-            self.packing_coordinates[texture] = (x, y, height, width)
+            self.packing_coordinates[texture] = (x, y, best_place_h, best_place_w, best_rotated)
 
-            leftover_w = w - width
-            leftover_h = h - height
+            leftover_w = w - best_place_w
+            leftover_h = h - best_place_h
 
             # split the remaining L-shaped space with a single guillotine cut, choosing
             # the axis that leaves the smaller (less wasteful) sliver of leftover space
@@ -335,17 +429,17 @@ class TextureAtlasPacker:
                 if leftover_w <= leftover_h:
                     # vertical cut: right region spans the full region height,
                     # bottom region spans only the placed texture's width
-                    new_regions.append([x + width, y, leftover_w, h])
-                    new_regions.append([x, y + height, width, leftover_h])
+                    new_regions.append([x + best_place_w, y, leftover_w, h])
+                    new_regions.append([x, y + best_place_h, best_place_w, leftover_h])
                 else:
                     # horizontal cut: bottom region spans the full region width,
                     # right region spans only the placed texture's height
-                    new_regions.append([x, y + height, w, leftover_h])
-                    new_regions.append([x + width, y, leftover_w, height])
+                    new_regions.append([x, y + best_place_h, w, leftover_h])
+                    new_regions.append([x + best_place_w, y, leftover_w, best_place_h])
             elif leftover_w > 0:
-                new_regions.append([x + width, y, leftover_w, h])
+                new_regions.append([x + best_place_w, y, leftover_w, h])
             elif leftover_h > 0:
-                new_regions.append([x, y + height, w, leftover_h])
+                new_regions.append([x, y + best_place_h, w, leftover_h])
 
             free_regions.extend(new_regions)
 
