@@ -1,6 +1,7 @@
 import os
 import time
 from texture_atlas_packer import TextureAtlasPacker
+from genetic_atlas_packer import GeneticAtlasPacker
 from shape_generator import ShapeGenerator
 import numpy as np
 
@@ -12,11 +13,12 @@ rectangles = shape_gen.generate_rectangles(20, 25, 200)
 atlas_packer = TextureAtlasPacker(rectangles)
 
 # sort textures based on area, perimeter, shortest side, or longest side
-atlas_packer.sort_texture_dimensions("area")
+atlas_packer.sort_texture_dimensions("none")
 
 # change atlas dimensions
 atlas_packer.set_atlas_dimensions(512, 512)
 
+#'''
 
 print("\n------------------------ Running Greedy Packing Algorithm ------------------------\n")
 start_time = time.perf_counter()
@@ -45,6 +47,20 @@ atlas_packer.pack("maxrects")
 end_time = time.perf_counter()
 atlas_packer.visualize_atlas()
 print(f"Execution time for maxrects algorithm: {end_time-start_time}\n")
+
+#'''
+
+print("\n------------------------ Running Genetic Algorithm Packing ------------------------\n")
+start_time = time.perf_counter()
+genetic_packer = GeneticAtlasPacker(rectangles, random_seed = 42, atlas_height=512, atlas_width=512)
+best_individual, best_fitness = genetic_packer.run()
+genetic_packer.pack_best()
+end_time = time.perf_counter()
+genetic_packer.empty_space()
+genetic_packer.visualize_atlas()
+print(f"Execution time for genetic algorithm: {end_time-start_time}\n")
+
+
 
 
 # packing example using assets from folder TextureAssets1 (ignore)
