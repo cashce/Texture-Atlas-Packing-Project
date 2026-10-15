@@ -47,8 +47,10 @@ class TextureAtlasPacker:
             self.texture_dimensions = dict(sorted(self.texture_dimensions.items(), key=lambda item: min(item[1][0], item[1][1])))
         elif (type == "longest side"):
             self.texture_dimensions = dict(sorted(self.texture_dimensions.items(), key=lambda item: max(item[1][0], item[1][1])))
+        elif (type == "none"):
+            pass
         else:
-            print("Invalid sorting type. Permitted Types: area, perimeter, shortest side, longest side")
+            print("Invalid sorting type. Permitted Types: area, perimeter, shortest side, longest side, none")
 
 
     # packs the uploaded textures based on algorithm specified by the user and returns the packing coordinates of the textures in the atlas
@@ -72,6 +74,7 @@ class TextureAtlasPacker:
 
         # print whitespace calculation
         print(f"Empty space in atlas after packing with {algorithm} algorithm: {self._empty_space_calculation() * 100:.2f}%")
+        return self._empty_space_calculation()
 
     # opens a gui of the atlas after the texures have been packed by the pack() method
     def visualize_atlas(self):
