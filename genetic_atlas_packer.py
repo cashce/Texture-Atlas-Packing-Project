@@ -351,7 +351,7 @@ class GeneticAtlasPacker:
         return (float(bounding_area),)
 
     # ------------------------------------------------------------------
-    # Visualisation
+    # Visualisation & export
     # ------------------------------------------------------------------
 
     def visualize_atlas(self, folder_path=None):
@@ -359,9 +359,13 @@ class GeneticAtlasPacker:
         Display the best packing found by ``run()`` in an OpenCV window.
 
         Supports two texture sources:
-        - **Real image files** – pass *folder_path* to the directory that
-          contains the image files.  Each texture key is treated as a
-          filename inside that directory.
+
+        - **Real image files on disk** – pass *folder_path* to the directory
+          that contains the image files.  Each texture key is used as the
+          filename inside that directory.  Images are loaded with their alpha
+          channel when present (RGBA) and alpha-composited onto the canvas;
+          BGR images are blitted directly.  Each image is resized to fill its
+          assigned atlas slot before compositing.
         - **Generated shapes** – leave *folder_path* as ``None``.  Textures
           must be in ShapeGenerator format ``(height, width, area, rgb)``.
           A solid-colour rectangle is rendered for each shape using its RGB
@@ -369,55 +373,192 @@ class GeneticAtlasPacker:
           remain visually distinct.
 
         If the rotation flag stored in ``packing_coordinates`` is ``True``,
-        the image block is rotated 90° clockwise before being blitted onto
+        the image block is rotated 90° clockwise before being composited onto
         the canvas so it matches the atlas slot exactly.
 
         Raises
         ------
         RuntimeError
-            If called before ``run()`` / ``pack_best()``.
+            If called before ``run()``.
         """
         if self.best_individual is None:
             raise RuntimeError("Call run() before visualize_atlas().")
 
+        atlas_image = self._render_atlas(folder_path)
+        cv2.imshow("Genetic Atlas", atlas_image)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+
+    def export_atlas(self, output_path, folder_path=None):
+        """
+        Render the best packing and save it as an image file (e.g. PNG).
+
+        The exported image is identical to what ``visualize_atlas`` displays
+        on screen.  The output directory is created automatically if it does
+        not already exist.
+
+        Parameters
+        ----------
+        output_path : str
+            Destination file path, e.g. ``"output/packed_atlas.png"``.
+            The file extension determines the format; ``.png`` is recommended
+            for lossless output.
+        folder_path : str or None, optional
+            Directory containing the real image files.  Pass ``None``
+            (default) when using generated ShapeGenerator shapes.
+
+        Returns
+        -------
+        str
+            The absolute path of the written file.
+
+        Raises
+        ------
+        RuntimeError
+            If called before ``run()``.
+        IOError
+            If OpenCV cannot write to *output_path*.
+        """
+        if self.best_individual is None:
+            raise RuntimeError("Call run() before export_atlas().")
+
+        atlas_image = self._render_atlas(folder_path)
+
+        # Ensure the output directory exists
+        out_dir = os.path.dirname(os.path.abspath(output_path))
+        os.makedirs(out_dir, exist_ok=True)
+
+        success = cv2.imwrite(output_path, atlas_image)
+        if not success:
+            raise IOError(
+                f"cv2.imwrite failed – could not write to '{output_path}'."
+            )
+
+        abs_path = os.path.abspath(output_path)
+        print(f"Atlas exported to '{abs_path}'")
+        return abs_path
+
+    def _render_atlas(self, folder_path=None):
+        """
+        Build and return the packed-atlas canvas as a BGR numpy array.
+
+        This is the shared rendering backend used by both ``visualize_atlas``
+        and ``export_atlas``.  It iterates over ``packing_coordinates``, loads
+        or constructs each texture block, optionally rotates it 90°, resizes
+        it to fill the atlas slot, alpha-composites RGBA images, and returns
+        the finished BGR canvas.
+
+        Parameters
+        ----------
+        folder_path : str or None
+            Directory containing real image files, or ``None`` for generated
+            ShapeGenerator shapes stored in ``self.textures``.
+
+        Returns
+        -------
+        numpy.ndarray
+            BGR image of shape ``(atlas_height, atlas_width, 3)``.
+        """
         packer = self.pack_best()
         coords = packer.packing_coordinates
 
-        # Blank canvas – black background
-        atlas_image = np.zeros((self.atlas_height, self.atlas_width, 3), dtype=np.uint8)
+        # Black BGR canvas
+        canvas = np.zeros((self.atlas_height, self.atlas_width, 3), dtype=np.uint8)
 
         for texture, coordinates in coords.items():
             x, y, height, width = coordinates[:4]
             rotated = coordinates[4] if len(coordinates) > 4 else False
 
             if folder_path is not None:
-                # Real texture file on disk
-                texture_file = cv2.imread(os.path.join(folder_path, texture))
+                # ── Real image file ──────────────────────────────────────
+                img_path = os.path.join(folder_path, texture)
+                # Load with alpha so RGBA images composite correctly
+                texture_file = cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
+                if texture_file is None:
+                    # Missing file: render a magenta placeholder so the gap is obvious
+                    texture_file = np.full(
+                        (height, width, 3), (255, 0, 255), dtype=np.uint8
+                    )
+                else:
+                    # Rotate before resize so the resize targets the correct slot dims
+                    if rotated:
+                        texture_file = cv2.rotate(
+                            texture_file, cv2.ROTATE_90_CLOCKWISE
+                        )
+                    # Resize to fill the atlas slot exactly
+                    if texture_file.shape[:2] != (height, width):
+                        texture_file = cv2.resize(
+                            texture_file, (width, height),
+                            interpolation=cv2.INTER_AREA
+                        )
+                    # Alpha-composite RGBA; plain BGR images fall through to blit
+                    if texture_file.ndim == 3 and texture_file.shape[2] == 4:
+                        self._composite_rgba(
+                            canvas, texture_file, x, y, height, width
+                        )
+                        continue  # already written to canvas
+
             else:
+                # ── Generated shape ──────────────────────────────────────
                 source = self.textures[texture]
                 if isinstance(source, np.ndarray):
-                    # A raw image array was supplied directly
-                    texture_file = source
+                    texture_file = source.copy()
+                    if rotated:
+                        texture_file = cv2.rotate(
+                            texture_file, cv2.ROTATE_90_CLOCKWISE
+                        )
+                    if texture_file.shape[:2] != (height, width):
+                        texture_file = cv2.resize(
+                            texture_file, (width, height),
+                            interpolation=cv2.INTER_AREA
+                        )
                 else:
-                    # ShapeGenerator format: (height, width, area, rgb).
-                    # Build the block to match the atlas slot.
-                    # When rotated=True, cv2.rotate will swap h and w, so we
-                    # build at (width, height) pre-rotation so it lands as
-                    # (height, width) after the rotate call below.
+                    # ShapeGenerator: (height, width, area, rgb).
+                    # Build at pre-rotate size so cv2.rotate lands at slot size.
                     block_h = width  if rotated else height
                     block_w = height if rotated else width
                     rgb = source[3] if len(source) > 3 else self._random_rgb()
                     texture_file = self._solid_color_rect(block_h, block_w, rgb)
+                    if rotated:
+                        texture_file = cv2.rotate(
+                            texture_file, cv2.ROTATE_90_CLOCKWISE
+                        )
 
-            # Apply 90° clockwise rotation when the skyline heuristic rotated the slot
-            if rotated:
-                texture_file = cv2.rotate(texture_file, cv2.ROTATE_90_CLOCKWISE)
+            # Drop alpha channel if still present before blitting to BGR canvas
+            if texture_file.ndim == 3 and texture_file.shape[2] == 4:
+                texture_file = texture_file[:, :, :3]
 
-            atlas_image[y:y + height, x:x + width] = texture_file
+            canvas[y:y + height, x:x + width] = texture_file
 
-        cv2.imshow("Genetic Atlas", atlas_image)
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
+        return canvas
+
+    def _composite_rgba(self, canvas, rgba_block, x, y, height, width):
+        """
+        Alpha-composite *rgba_block* (BGRA) onto *canvas* (BGR) at (x, y).
+
+        Each destination pixel is blended as::
+
+            out = alpha * src_bgr + (1 - alpha) * dst_bgr
+
+        where *alpha* comes from the source block's A channel normalised to
+        [0, 1].  The result is written directly into *canvas* in-place.
+
+        Parameters
+        ----------
+        canvas : numpy.ndarray
+            BGR atlas canvas, modified in-place.
+        rgba_block : numpy.ndarray
+            BGRA image block already sized to ``(height, width, 4)``.
+        x, y, height, width : int
+            Destination slot coordinates and dimensions.
+        """
+        src_bgr = rgba_block[:, :, :3].astype(np.float32)
+        alpha   = rgba_block[:, :,  3].astype(np.float32) / 255.0
+        alpha   = alpha[:, :, np.newaxis]          # broadcast over BGR channels
+
+        dst     = canvas[y:y + height, x:x + width].astype(np.float32)
+        blended = alpha * src_bgr + (1.0 - alpha) * dst
+        canvas[y:y + height, x:x + width] = blended.astype(np.uint8)
 
     # ------------------------------------------------------------------
     # Empty-space calculation

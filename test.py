@@ -65,28 +65,6 @@ print(f"Execution time for genetic algorithm: {end_time-start_time}\n")
 '''
 
 
-# packing example using assets from folder TextureAssets1 (ignore)
-'''
-# 1. open folder containing practice textures and create a list of texture file names
-folder_path = "TextureAssets1"
-textures = [f for f in os.listdir(folder_path) if f.endswith(('.png', '.jpg'))]
-print(f"Found {len(textures)} textures in the folder.")
-print(f"Textures: {textures}")
-
-# 2. Create a TextureAtlasPacker object with the textures 
-atlas_packer = TextureAtlasPacker(textures, folder_path)
-atlas_packer.get_texture_dimensions()
-#print(atlas_packer.texture_dimensions)
-
-# 3. Pack the textures into an atlas
-atlas_packer.pack("greedy")
-#print(f"Packing coordinates: {atlas_file}")
-
-# 4. Visualize the packed atlas
-atlas_packer.visualize_atlas()
-
-'''
-
 import time
 import random
 from sys import maxsize
@@ -126,6 +104,8 @@ for iteration in range(1, NUM_ITERATIONS + 1):
 
     # 1. Standard Texture Atlas Packer Algorithms
     for algo in standard_algorithms:
+        if (algo=="greedy"):
+            continue;
         atlas_packer = TextureAtlasPacker(rectangles)
         atlas_packer.sort_texture_dimensions("none")
         atlas_packer.set_atlas_dimensions(ATLAS_WIDTH, ATLAS_HEIGHT)
@@ -137,11 +117,12 @@ for iteration in range(1, NUM_ITERATIONS + 1):
         execution_times[algo].append(end_time - start_time)
         empty_spaces[algo].append(empty_space)
 
+
     # 2. Genetic Atlas Packer Algorithm
-    start_time = time.perf_counter()
     genetic_packer = GeneticAtlasPacker(
         rectangles, seed=42, atlas_height=ATLAS_HEIGHT, atlas_width=ATLAS_WIDTH
     )
+    start_time = time.perf_counter()
     best_individual, best_fitness = genetic_packer.run()
     genetic_packer.pack_best()
     end_time = time.perf_counter()
@@ -150,6 +131,7 @@ for iteration in range(1, NUM_ITERATIONS + 1):
 
     execution_times["genetic"].append(end_time - start_time)
     empty_spaces["genetic"].append(empty_space)
+    genetic_packer.visualize_atlas()
 
 # Final Averages Summary
 print("\n" + "=" * 60)
