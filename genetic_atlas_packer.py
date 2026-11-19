@@ -81,7 +81,10 @@ class GeneticAtlasPacker:
         self.atlas_height = atlas_height
 
         # Use the provided fitness function or fall back to the built-in one
-        self._fitness_fn = fitness_fn if fitness_fn is not None else self._skyline_fitness
+        if fitness_fn == "skyline fitness":
+            self._fitness_fn = self._skyline_fitness
+        else:
+            self._fitness_fn = self._empty_space_fitness
 
         # Ordered list of texture keys – the "gene alphabet"
         self._keys = list(textures.keys())
@@ -151,7 +154,8 @@ class GeneticAtlasPacker:
 
     def pack_best(self):
         """
-        Run the skyline packer with the best individual found after ``run()``.
+        Run the skyline (no-rotation) packer with the best individual found
+        after ``run()``.
 
         Returns
         -------
@@ -268,15 +272,15 @@ class GeneticAtlasPacker:
     def _pack_individual(self, individual):
         """
         Pack the rectangles described by *individual* using the skyline
-        bottom-left algorithm from TextureAtlasPacker, respecting the
-        individual's ordering and per-rectangle rotation flags.
+        bottom-left algorithm (no rotation) from TextureAtlasPacker,
+        respecting the individual's ordering and per-rectangle rotation flags.
 
-        The rotation flag in the individual pre-swaps height and width before
-        the skyline heuristic sees the rectangle.  The skyline heuristic may
-        then *additionally* rotate a rectangle if that produces a better fit
-        (since TextureAtlasPacker._basic_skyline_packer also tries both
-        orientations).  The net rotation recorded in packing_coordinates
-        captures the combined effect.
+        The rotation flag carried by each gene pre-swaps height and width in
+        the texture-dimensions dict before the packer sees the rectangle.
+        The packer itself (``_skyline_no_rotation_packer``) never rotates —
+        only the GA's genes control orientation.  This keeps rotation decisions
+        entirely within the genetic search rather than splitting them between
+        the GA and the heuristic.
 
         Returns
         -------
@@ -284,7 +288,8 @@ class GeneticAtlasPacker:
             Packer with ``packing_coordinates`` populated.
         """
         # Build an ordered texture_dimensions dict that honours the individual's
-        # gene order.  Pre-apply the individual's rotation by swapping h/w.
+        # gene order.  Pre-apply the individual's rotation by swapping h/w so
+        # the no-rotation packer sees the correct slot dimensions.
         ordered_dims = {}
         for key, rotated in individual:
             if key not in self.textures:
@@ -298,23 +303,38 @@ class GeneticAtlasPacker:
             else:
                 ordered_dims[key] = (orig_h, orig_w, area)
 
-        # Create a packer, inject the ordered dimensions, and run skyline
+        # Create a packer, inject the ordered dimensions, and run the
+        # no-rotation skyline packer so the GA fully owns rotation decisions.
         packer = TextureAtlasPacker.__new__(TextureAtlasPacker)
-        packer.textures          = self.textures
-        packer.folder_path       = None
-        packer.texture_dimensions = ordered_dims
-        packer.atlas_width       = self.atlas_width
-        packer.atlas_height      = self.atlas_height
-        packer.algorithm         = "skyline"
+        packer.textures            = self.textures
+        packer.folder_path         = None
+        packer.texture_dimensions  = ordered_dims
+        packer.atlas_width         = self.atlas_width
+        packer.atlas_height        = self.atlas_height
+        packer.algorithm           = "skyline_no_rot"
         packer.packing_coordinates = {}
 
-        packer._basic_skyline_packer()
+        packer._skyline_no_rotation_packer()
         return packer
 
     # ------------------------------------------------------------------
-    # Built-in fitness function – skyline bounding-area
+    # Built-in fitness functions – empty space, skyline bounding-area
     # ------------------------------------------------------------------
+    def _empty_space_fitness(self, individual):
+        '''Fitness = atlas_area - area(packed rectangles)'''
 
+        packer = self._pack_individual(individual)
+        coords = packer.packing_coordinates
+    
+        if not coords:
+            # Nothing was placed – worst possible score
+            return (self.atlas_width * self.atlas_height,)
+        
+        packed_area = sum(h * w for (x, y, h, w, *_) in coords.values())
+        atlas_area  = self.atlas_width * self.atlas_height
+        fraction    = (atlas_area - packed_area) / atlas_area
+
+        return (float(fraction),)
     def _skyline_fitness(self, individual):
         """
         Fitness = atlas_width × (height of the highest packed rectangle).
@@ -480,8 +500,19 @@ class GeneticAtlasPacker:
                         (height, width, 3), (255, 0, 255), dtype=np.uint8
                     )
                 else:
-                    # Rotate before resize so the resize targets the correct slot dims
-                    if rotated:
+                    img_h, img_w = texture_file.shape[:2]
+
+                    # The GA pre-swaps h/w in ordered_dims when a gene is rotated,
+                    # so packing_coordinates stores the swapped slot size with
+                    # rotated=False.  Detect this case by comparing the image's
+                    # natural dimensions against the atlas slot: if they are
+                    # transposed, rotate the image 90° before resizing so it fills
+                    # the slot correctly without distortion.
+                    needs_rotate = rotated or (
+                        img_h != height and img_w != width
+                        and img_h == width and img_w == height
+                    )
+                    if needs_rotate:
                         texture_file = cv2.rotate(
                             texture_file, cv2.ROTATE_90_CLOCKWISE
                         )
@@ -591,7 +622,7 @@ class GeneticAtlasPacker:
         atlas_area  = self.atlas_width * self.atlas_height
         fraction    = (atlas_area - packed_area) / atlas_area
 
-        print(f"Empty space in atlas after GA packing: {fraction * 100:.2f}%")
+        #print(f"Empty space in atlas after GA packing: {fraction * 100:.2f}%")
         return fraction
 
     # ------------------------------------------------------------------

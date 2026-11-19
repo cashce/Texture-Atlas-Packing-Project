@@ -64,12 +64,14 @@ class TextureAtlasPacker:
             self._basic_greedy_packer()
         elif algorithm == "skyline":
             self._basic_skyline_packer()
+        elif algorithm == "skyline_no_rot":
+            self._skyline_no_rotation_packer()
         elif algorithm == "maxrects"    :
             self._basic_maxrects_packer()
         elif algorithm == "guillotine":
             self._basic_guillotine_packer()
         else:
-            print("Algorithm not recognized. Accepted algorithms: greedy, skyline, maxrects, guillotine.")
+            print("Algorithm not recognized. Accepted algorithms: greedy, skyline, skyline_no_rot, maxrects, guillotine.")
             return None
 
         # print whitespace calculation
@@ -244,6 +246,67 @@ class TextureAtlasPacker:
 
             # update the skyline to reflect the newly placed texture
             self._update_skyline(segments, best_x, place_w, best_y + place_h)
+
+    # rectangle support, rotations NOT allowed
+    # skyline bottom-left algorithm (no rotation): places each texture at the
+    # lowest-then-leftmost position along the current skyline profile.  Only the
+    # original orientation is considered; rotating the texture is never attempted.
+    def _skyline_no_rotation_packer(self):
+        # skyline segments: list of [x, width, y] covering the full atlas width with no gaps,
+        # sorted left to right, where y is the current height of the skyline at that segment
+        segments = [[0, self.atlas_width, 0]]
+
+        for texture, dimensions in self.texture_dimensions.items():
+            height, width, area = dimensions
+
+            # skip textures that are simply too large for the atlas in their fixed orientation
+            if width > self.atlas_width or height > self.atlas_height:
+                #print(f"Texture {texture} is too large to fit in the atlas. Change the atlas dimensions or remove the texture from the list.")
+                continue
+
+            best = None  # (span_y, wasted_space, x)
+
+            # try placing the texture starting at each segment's left edge
+            for i in range(len(segments)):
+                x = segments[i][0]
+                if x + width > self.atlas_width:
+                    continue
+
+                # find the highest skyline point spanned by the texture's width
+                span_y = 0
+                j = i
+                while j < len(segments) and segments[j][0] < x + width:
+                    span_y = max(span_y, segments[j][2])
+                    j += 1
+
+                if span_y + height > self.atlas_height:
+                    continue
+
+                # wasted space = area between the texture's bottom edge and the skyline beneath it
+                wasted_space = 0
+                j = i
+                while j < len(segments) and segments[j][0] < x + width:
+                    seg_x, seg_w, seg_y = segments[j]
+                    overlap = min(seg_x + seg_w, x + width) - max(seg_x, x)
+                    wasted_space += (span_y - seg_y) * overlap
+                    j += 1
+
+                candidate = (span_y, wasted_space, x)
+                if best is None or candidate[:2] < best[:2]:
+                    best = candidate
+
+            # if no valid position exists, skip this texture
+            if best is None:
+                #print(f"Texture {texture} could not be placed in the atlas. Change the atlas dimensions or remove the texture from the list.")
+                continue
+
+            best_y, best_wasted_space, best_x = best
+
+            # record the placement (rotated is always False)
+            self.packing_coordinates[texture] = (best_x, best_y, height, width, False)
+
+            # update the skyline to reflect the newly placed texture
+            self._update_skyline(segments, best_x, width, best_y + height)
 
     # internal method used by _basic_skyline_packer to update the skyline profile
     # after placing a texture: splits/removes segments under the texture, inserts a
@@ -472,5 +535,3 @@ class TextureAtlasPacker:
                 pruned.append(list(rect))
 
         return pruned
-
-
